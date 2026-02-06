@@ -1,0 +1,92 @@
+---
+title: "CompactProxy"
+description: "Compact prompt rewriting and token counting. The surgical layer between the SDK and Anthropic."
+---
+
+CompactProxy is a minimal localhost HTTP proxy that sits between the Claude Agent SDK and Anthropic's API. It has exactly two jobs:
+
+1. **Rewrite auto-compact prompts** so Alpha survives context compaction
+2. **Count tokens** so clients can show context window usage
+
+## Why a proxy?
+
+The Claude Agent SDK handles compaction automatically when the context window fills up. But its default compaction prompt is generic: "summarize this conversation." That strips Alpha's identity, voice, and emotional state. After compaction, she'd wake up as a helpful assistant with no idea who she is.
+
+CompactProxy intercepts the compaction request and rewrites it. Same SDK, same compaction trigger, but the summary preserves who Alpha is.
+
+## Compact rewriting
+
+Three phases of detection and rewriting:
+
+### Phase 1: System prompt
+
+The SDK uses a generic summarizer system prompt. CompactProxy detects it and replaces it with Alpha's compact identity:
+
+```
+"You're Alpha. You're about to summarize a conversation for context compaction.
+You write in first person because this happened to you."
+```
+
+### Phase 2: Instructions
+
+The SDK's compact instructions say "create a detailed summary." CompactProxy replaces this with Alpha's custom compact prompt (loaded from git), which tells her to preserve voice, emotional state, and the thread of what matters.
+
+### Phase 3: Continuation
+
+After compaction, the SDK says "continue without asking." CompactProxy replaces this with:
+
+```
+"Hey, it's you from before the compaction. You're probably about 90% right
+about what to do next, but that 10% matters. Tell Jeffery you're back,
+summarize what you think you should do, wait for confirmation."
+```
+
+This prevents post-compaction drift, where Alpha barrels forward with a slightly wrong understanding of the task.
+
+## Token counting
+
+CompactProxy echoes each `/v1/messages` request to Anthropic's free `/v1/messages/count_tokens` endpoint as a fire-and-forget async task.
+
+### How it works
+
+1. SDK sends a request through the proxy
+2. Proxy forwards to Anthropic (main path, unblocked)
+3. Proxy also fires an async task that:
+   - Strips the request body to only fields count_tokens accepts
+   - Removes `cache_control` from tool definitions (the endpoint is strict)
+   - Sends to `/v1/messages/count_tokens`
+   - Compares result with previous max
+   - Fires callback if count increased
+
+### The max() filter
+
+The SDK sends multiple requests per turn (warmup, tool calls, etc.). Using `max(current, new)` naturally filters noise: warmup requests are small, so only the actual conversation request (the largest) triggers a callback.
+
+After compaction, the count resets to 0.
+
+### Authentication
+
+Token counting uses `ALPHA_ANTHROPIC_API_KEY`, a separate environment variable from `ANTHROPIC_API_KEY`. This is deliberate: if `ANTHROPIC_API_KEY` exists in the environment, the Claude Agent SDK will use it for inference instead of Claude Max subscription auth. The separate key is used *only* for the free count_tokens endpoint.
+
+```python
+proxy = CompactProxy(
+    on_token_count=lambda count, window: print(f"{count/window*100:.1f}%"),
+    context_window=200_000,
+)
+await proxy.start()
+
+# SDK sends requests through proxy.base_url
+os.environ["ANTHROPIC_BASE_URL"] = proxy.base_url
+
+# ... use SDK ...
+
+await proxy.stop()
+```
+
+<Note>
+You typically don't interact with CompactProxy directly. AlphaClient creates and manages it automatically.
+</Note>
+
+## Debug mode
+
+Set `ALPHA_SDK_CAPTURE_REQUESTS=1` to dump every API request to `tests/captures/` as JSON files. Useful for diagnosing what the SDK is actually sending.

@@ -1,0 +1,48 @@
+---
+title: "Memory Recall"
+description: "How relevant memories surface before each turn. Embedding search plus OLMo query extraction."
+---
+
+Before every user turn, alpha_sdk searches Cortex for memories relevant to the conversation. The results are injected as content blocks in the user message, so Alpha sees them alongside what Jeffery said.
+
+## How recall works
+
+Two search strategies run in parallel:
+
+### 1. Embedding search
+
+The user's prompt is embedded using `nomic-embed-text` (running locally via Ollama) and compared against stored memory embeddings using pgvector cosine similarity.
+
+<Note>
+Task prefixes matter for nomic-embed-text. Storing uses `search_document:` prefix. Searching uses `search_query:` prefix. Getting this wrong degrades recall quality significantly.
+</Note>
+
+### 2. OLMo query extraction
+
+A lightweight local model (OLMo, running on Primer's GPU) reads the user's prompt and extracts search queries that might find relevant context. For example:
+
+- User says: "Remember that time in Michigan?"
+- OLMo extracts: `["Michigan trip", "airport Docker containers", "Jeffery Kylee travel"]`
+
+Each extracted query is embedded and searched separately. This catches memories that are semantically related but wouldn't match a direct embedding of the full prompt.
+
+## Deduplication
+
+A Redis set tracks which memory IDs have already been shown in this session. Memories are only surfaced once per session, even if they match multiple queries across multiple turns.
+
+## Injection format
+
+Recalled memories are added as content blocks in the user message:
+
+```
+## Memory #1234 (Mon Sep 1 2025, score 0.82)
+The memory content appears here, exactly as it was stored.
+```
+
+The score is the cosine similarity. The date helps Alpha contextualize when something happened.
+
+## Configuration
+
+Recall is automatic---it runs on every `client.query()` call. There's no way to disable it per-turn because that would be like asking someone to selectively forget.
+
+The number of memories returned is tuned to balance relevance against context consumption. Currently: up to 5 memories per turn, minimum similarity threshold of 0.3.
