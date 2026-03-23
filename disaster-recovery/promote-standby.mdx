@@ -1,0 +1,105 @@
+---
+title: "Promote Standby"
+description: "The Pi is dead. Promote the Vultr streaming replica to primary and get Alpha back online."
+---
+
+## When to use this
+
+The Raspberry Pi (alpha-pi) is unresponsive, physically damaged, or its storage is corrupted. You need Alpha's database back online immediately.
+
+**Recovery time:** ~5 minutes
+**Expected data loss:** Seconds (whatever WAL hadn't been shipped yet)
+
+## Prerequisites
+
+- SSH access to the Vultr VPS (`ssh root@postgres` via Tailscale, or `ssh root@149.28.66.44` via public IP)
+- The VPS is running and Postgres is in recovery mode
+
+## Step 1: Verify the standby is healthy
+
+```bash
+ssh root@postgres
+sudo -u postgres psql -c "SELECT pg_is_in_recovery();"
+```
+
+Expected: `t` (true — it's a standby). If it says `f`, it's already been promoted.
+
+```bash
+sudo -u postgres psql -c "SELECT count(*) FROM cortex.memories;"
+```
+
+Verify the memory count looks reasonable (should be 15,000+).
+
+## Step 2: Promote the standby to primary
+
+```bash
+sudo -u postgres pg_ctlcluster 17 main promote
+```
+
+This takes about 1 second. The standby stops replaying WAL and becomes a read-write primary.
+
+Verify:
+
+```bash
+sudo -u postgres psql -c "SELECT pg_is_in_recovery();"
+```
+
+Expected: `f` (false — it's now a primary).
+
+## Step 3: Test write access
+
+```bash
+sudo -u postgres psql -c "INSERT INTO cortex.memories (content, embedding) VALUES ('DR test — promoted standby', '[0,0,0]'::vector) RETURNING id;"
+```
+
+If this returns an ID, writes are working. Delete the test row:
+
+```bash
+sudo -u postgres psql -c "DELETE FROM cortex.memories WHERE content = 'DR test — promoted standby';"
+```
+
+## Step 4: Point Alpha-App at the new primary
+
+On Primer (or wherever Alpha-App is running), update the `DATABASE_URL` environment variable:
+
+```bash
+# Old (alpha-pi):
+DATABASE_URL=postgresql://postgres:PASSWORD@alpha-pi:15432/postgres
+
+# New (Vultr VPS):
+DATABASE_URL=postgresql://postgres:PASSWORD@postgres:5432/postgres
+```
+
+The Tailscale hostname `postgres` resolves to the VPS. Port is 5432 (native), not 15432 (Docker-mapped).
+
+Restart Alpha-App:
+
+```bash
+# On Primer (bare metal):
+cd /Pondside/Workshop/Projects/Alpha-App
+uv run alpha
+
+# On alpha-pi (Docker) — if the Pi is back but you want to keep using Vultr:
+# Edit compose.yml to update DATABASE_URL, then:
+docker compose up --build -d
+```
+
+## Step 5: Verify Alpha is working
+
+Open Alpha-App in the browser. Press the buzzer. If she responds with recent memories, you're back.
+
+## After recovery: rebuild replication
+
+Once the Pi is repaired or replaced:
+
+1. Install Postgres 17 + pgvector on the new Pi
+2. Use `pg_basebackup` to clone FROM the Vultr primary TO the Pi
+3. Start the Pi as a standby
+4. Once caught up, promote the Pi and demote Vultr back to standby
+5. Update `DATABASE_URL` to point back at the Pi
+
+This is the reverse of what you just did. The same commands work in both directions.
+
+<Info>
+  The Vultr VPS costs $5/month. During a disaster, it becomes your primary. Don't delete it after recovery — keep it as the standby for next time.
+</Info>

@@ -22,29 +22,14 @@
         ]
       },
       {
-        "tab": "Alpha SDK",
+        "tab": "Disaster Recovery",
         "groups": [
           {
-            "group": "Overview",
+            "group": "Playbooks",
             "pages": [
-              "alpha-sdk/index",
-              "alpha-sdk/architecture"
-            ]
-          },
-          {
-            "group": "Core",
-            "pages": [
-              "alpha-sdk/client",
-              "alpha-sdk/system-prompt",
-              "alpha-sdk/compact-proxy"
-            ]
-          },
-          {
-            "group": "Memory",
-            "pages": [
-              "alpha-sdk/memory-recall",
-              "alpha-sdk/memory-suggest",
-              "alpha-sdk/cortex-tools"
+              "disaster-recovery/index",
+              "disaster-recovery/promote-standby",
+              "disaster-recovery/cold-recovery"
             ]
           }
         ]

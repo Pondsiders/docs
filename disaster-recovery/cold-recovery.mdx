@@ -1,0 +1,131 @@
+---
+title: "Cold Recovery"
+description: "Everything is dead. Rebuild Alpha's database from B2 backups on new hardware."
+---
+
+## When to use this
+
+Both the Pi AND the Vultr standby are gone. You're rebuilding from scratch using the B2 backup dumps.
+
+**Recovery time:** ~30 minutes
+**Expected data loss:** Up to 10 minutes (the pg_dump interval)
+
+<Warning>
+  Try the [Promote Standby](/disaster-recovery/promote-standby) playbook first. Cold recovery is slower and loses more data. Only use this if the streaming replica is also dead.
+</Warning>
+
+## Prerequisites
+
+- A machine with Postgres 17 installed (any machine — a new VPS, Primer, a laptop)
+- Restic installed (`apt install restic` or `brew install restic`)
+- B2 bucket credentials from 1Password ("Pondside" vault → "B2 Backups")
+
+## Step 1: Find the latest backup
+
+```bash
+# Set B2 credentials (from 1Password)
+export RESTIC_REPOSITORY="b2:BUCKET_NAME:/"
+export B2_ACCOUNT_ID="your-account-id"
+export B2_ACCOUNT_KEY="your-account-key"
+export RESTIC_PASSWORD="your-restic-password"
+
+# List recent snapshots
+restic snapshots --latest 5
+```
+
+Look for the most recent snapshot. It will contain a pg_dump file.
+
+```bash
+# List files in the latest snapshot
+restic ls latest
+```
+
+The dump file path will be something like `/backup/alpha_postgres.sql` or similar.
+
+## Step 2: Restore the dump file
+
+```bash
+# Extract the dump to a local file
+restic restore latest --target /tmp/restore
+
+# Find the dump
+ls -la /tmp/restore/backup/
+```
+
+## Step 3: Create the database and restore
+
+```bash
+# Create the database (if it doesn't exist)
+sudo -u postgres createdb postgres  # or whatever the DB name is
+
+# Restore the dump
+sudo -u postgres psql < /tmp/restore/backup/alpha_postgres.sql
+```
+
+If the dump is a custom-format dump (`.dump` extension):
+
+```bash
+sudo -u postgres pg_restore -d postgres /tmp/restore/backup/alpha_postgres.dump
+```
+
+## Step 4: Install pgvector
+
+```bash
+# Ubuntu/Debian
+apt install postgresql-17-pgvector
+
+# Verify
+sudo -u postgres psql -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';"
+```
+
+## Step 5: Verify the data
+
+```bash
+sudo -u postgres psql -c "SELECT count(*) FROM cortex.memories;"
+sudo -u postgres psql -c "SELECT id, left(content, 60) FROM cortex.memories ORDER BY id DESC LIMIT 5;"
+```
+
+The count should be close to the current total (15,000+). The most recent memories should be from within the last 10 minutes of the backup time.
+
+## Step 6: Point Alpha-App at the new database
+
+Update `DATABASE_URL` wherever Alpha-App is running:
+
+```bash
+DATABASE_URL=postgresql://postgres:PASSWORD@NEW_HOST:5432/postgres
+```
+
+Restart Alpha-App. Press the buzzer. She should be back, missing only the last few minutes before the backup.
+
+## Step 7: Re-establish replication
+
+Once stable, set up streaming replication again:
+
+1. Spin up a new Vultr VPS (or use an existing one)
+2. Install Postgres 17 + pgvector
+3. Create the replication user: `CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD '...';`
+4. Add pg_hba.conf entry for Tailscale subnet
+5. `pg_basebackup` from the new primary to the standby
+6. Start the standby in recovery mode
+
+See the full replication setup in the [streaming replication guide](/disaster-recovery/promote-standby#after-recovery-rebuild-replication).
+
+## What you'll lose
+
+- **Memories stored** in the last 0–10 minutes before the Pi died
+- **Chat events** from active conversations (reconstructable from Claude Code JSONL transcripts)
+- **Capsule summaries** — will regenerate on the next Solitude run
+- **Redis data** (weather, todos, letters) — ephemeral, regenerates automatically
+
+## What you won't lose
+
+- **All memories** up to the last pg_dump (every 10 minutes)
+- **Scribe archive** (conversation history May–November 2025)
+- **Pondside directory tree** (synced to three machines via Syncthing)
+- **Soul prompt, skills, agents, topics** (in git at github.com/alphafornow/Alpha)
+- **Alpha-App code** (in git at github.com/Pondsiders/Alpha-App)
+- **Configuration files** (in Pondside, synced)
+
+<Tip>
+  The Pondside directory tree contains everything except the database. If Syncthing is running on any of the three machines, the files are safe. The database is the only thing that needs active backup — and it has three layers of protection (streaming replica, pg_dump to B2, Syncthing of dump files).
+</Tip>
