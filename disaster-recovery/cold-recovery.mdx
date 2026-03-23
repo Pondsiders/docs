@@ -8,7 +8,7 @@ description: "Everything is dead. Rebuild Alpha's database from B2 backups on ne
 Both the Pi AND the Vultr standby are gone. You're rebuilding from scratch using the B2 backup dumps.
 
 **Recovery time:** ~30 minutes
-**Expected data loss:** Up to 15 minutes (the backup interval)
+**Expected data loss:** Up to 10 minutes (the backup interval)
 
 <Warning>
   Try the [Promote Standby](/disaster-recovery/promote-standby) playbook first. Cold recovery is slower and loses more data. Only use this if the streaming replica is also dead.
@@ -18,7 +18,7 @@ Both the Pi AND the Vultr standby are gone. You're rebuilding from scratch using
 
 The Pi runs a backup sidecar container (`alpha-postgres-backup`) that:
 
-1. Runs `pg_dump | gzip` every 15 minutes on the clock (:00, :15, :30, :45)
+1. Runs `pg_dump | gzip` every 10 minutes on the clock (:00, :10, :20, :30, :40, :50)
 2. SHA256-hashes the dump and compares to the previous one
 3. If changed: uploads to Backblaze B2 as `alpha-YYYYMMDD-HHMMSS.sql.gz`
 4. If unchanged: skips upload
@@ -81,7 +81,7 @@ sudo -u postgres psql -c "SELECT count(*) FROM cortex.memories;"
 sudo -u postgres psql -c "SELECT id, left(content, 60) FROM cortex.memories ORDER BY id DESC LIMIT 5;"
 ```
 
-The count should be close to the current total (15,000+). The most recent memories should be from within 15 minutes of the backup timestamp.
+The count should be close to the current total (15,000+). The most recent memories should be from within 10 minutes of the backup timestamp.
 
 ## Step 5: Point Alpha-App at the new database
 
@@ -108,13 +108,13 @@ See the [Promote Standby](/disaster-recovery/promote-standby#after-recovery-rebu
 
 ## What you'll lose
 
-- **Memories stored** in the last 0–15 minutes before the Pi died
+- **Memories stored** in the last 0–10 minutes before the Pi died
 - **Chat events** from active conversations
 - **Capsule summaries** — will regenerate on the next Solitude run
 
 ## What you won't lose
 
-- **All memories** up to the last pg_dump (every 15 minutes)
+- **All memories** up to the last pg_dump (every 10 minutes)
 - **Scribe archive** (conversation history May–November 2025)
 - **Pondside directory tree** (synced to three machines via Syncthing)
 - **Soul prompt, skills, agents, topics** (in git at github.com/alphafornow/Alpha)
