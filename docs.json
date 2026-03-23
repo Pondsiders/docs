@@ -29,7 +29,8 @@
             "pages": [
               "disaster-recovery/index",
               "disaster-recovery/promote-standby",
-              "disaster-recovery/cold-recovery"
+              "disaster-recovery/cold-recovery",
+              "disaster-recovery/restic-recovery"
             ]
           }
         ]

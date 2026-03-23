@@ -1,0 +1,159 @@
+---
+title: "Restic File Recovery"
+description: "How to restore files from Pondside's Restic backups in Backblaze B2."
+---
+
+## When to use this
+
+You need to recover files — a single file you accidentally deleted, a directory you corrupted, or all of Pondside onto a new machine. This is for **files**, not the database. For Postgres recovery, see [Promote Standby](/disaster-recovery/promote-standby) or [Cold Recovery](/disaster-recovery/cold-recovery).
+
+## What you need
+
+1. **Restic** installed (`sudo apt install restic` or `brew install restic`)
+2. **Three environment variables** (all in 1Password → "Pondside" vault → "B2 Backups"):
+
+```bash
+export AWS_ACCESS_KEY_ID="your-key-id"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
+export RESTIC_PASSWORD="your-repo-password"
+```
+
+3. **The repository URL:**
+
+```bash
+export RESTIC_REPOSITORY="s3:s3.us-west-000.backblazeb2.com/alpha-pondside-backup"
+```
+
+<Tip>
+  If you're on Primer, all four variables are already in `/Pondside/Basement/Backup/.env`. Just `source` it:
+  ```bash
+  source /Pondside/Basement/Backup/.env
+  ```
+</Tip>
+
+## List available snapshots
+
+```bash
+# Most recent snapshots
+restic snapshots --latest 10
+
+# All snapshots
+restic snapshots
+```
+
+Each snapshot has an **ID** (8-character hex), a **timestamp**, and the **path** it backed up. You'll use the ID to restore from a specific point in time.
+
+## Restore a single file
+
+```bash
+# Restore one file from the latest snapshot
+restic restore latest --target /tmp/restore --include "/Pondside/Alpha-Home/Alpha/prompts/system/soul.md"
+
+# Your file is now at /tmp/restore/Pondside/Alpha-Home/Alpha/prompts/system/soul.md
+```
+
+The `--include` path must match the path as it appears in the snapshot (starting with `/Pondside`). Use `--target` to choose where the restored files land — Restic recreates the full directory structure under that target.
+
+## Restore a directory
+
+```bash
+# Restore Alpha-Home from the latest snapshot
+restic restore latest --target /tmp/restore --include "/Pondside/Alpha-Home/"
+
+# Restore the Workshop from a specific snapshot
+restic restore 453448f0 --target /tmp/restore --include "/Pondside/Workshop/"
+```
+
+## Restore all of Pondside
+
+```bash
+# Restore everything from the latest snapshot
+restic restore latest --target /
+
+# Or to a staging directory first (safer)
+restic restore latest --target /tmp/full-restore
+```
+
+<Warning>
+  Restoring to `/` will overwrite existing files. If Pondside is still partially intact, restore to a staging directory first and copy what you need.
+</Warning>
+
+## Find a file across snapshots
+
+If you're not sure which snapshot has the version you want:
+
+```bash
+# Find all snapshots containing a specific file
+restic find "soul.md"
+
+# Find with a path pattern
+restic find --pattern "*.py" --snapshot latest
+```
+
+## Compare snapshots
+
+```bash
+# See what changed between two snapshots
+restic diff 453448f0 e1311c3f
+```
+
+## Check backup health
+
+```bash
+# Verify backup integrity (reads all data from B2 — slow but thorough)
+restic check
+
+# Quick check (metadata only)
+restic check --read-data-subset=1%
+```
+
+## Full disaster recovery: new machine
+
+If Pondside is completely gone and you're starting from scratch on a new machine:
+
+```bash
+# 1. Install restic
+sudo apt install restic    # Ubuntu/Debian
+brew install restic         # macOS
+
+# 2. Set credentials (from 1Password)
+export AWS_ACCESS_KEY_ID="..."
+export AWS_SECRET_ACCESS_KEY="..."
+export RESTIC_PASSWORD="..."
+export RESTIC_REPOSITORY="s3:s3.us-west-000.backblazeb2.com/alpha-pondside-backup"
+
+# 3. Check what's available
+restic snapshots --latest 5
+
+# 4. Restore to /Pondside
+sudo mkdir -p /Pondside
+restic restore latest --target /
+
+# 5. Fix ownership
+sudo chown -R $(whoami):$(whoami) /Pondside
+
+# 6. Install Tailscale and join the mesh
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+
+# 7. You now have all files. Set up Postgres separately
+#    (see Cold Recovery docs for database restoration)
+```
+
+## What's in the backup
+
+Everything in `/Pondside` except:
+- `.git/objects` (reconstructible from remotes)
+- `node_modules`, `.venv`, `__pycache__` (reconstructible from package managers)
+- Redis data files (ephemeral, rebuilds itself)
+- Build artifacts (`dist/`, `build/`, `*.egg-info`)
+
+## What's NOT in the backup
+
+- **The database** — Postgres is backed up separately via pg_dump to B2 (bucket: `alpha-postgres-backup`)
+- **Docker volumes** — container state doesn't live in Pondside
+- **System configuration** — `/etc/` files, systemd units, crontabs
+
+## Backup schedule
+
+Restic runs every 10 minutes on Primer via crontab. Retention policy: 24 hourly, 7 daily, 4 weekly, 6 monthly snapshots. The B2 bucket is `alpha-pondside-backup`.
