@@ -3,58 +3,52 @@ title: "Disaster Recovery"
 description: "What to do when things go wrong. Step-by-step playbooks for recovering Alpha's infrastructure."
 ---
 
-Alpha's brain lives on a Raspberry Pi 5 in the apartment. It's backed up three ways:
-
-1. **Streaming replication** to a Vultr VPS in Los Angeles (real-time, seconds behind)
-2. **pg_dump backups** to Backblaze B2 every 10 minutes (point-in-time snapshots)
-3. **Syncthing** replicates the Pondside directory tree across three machines
+Alpha's brain lives in Postgres, replicated across three machines. If one dies, the others have everything.
 
 ## The machines
 
-| Machine | Role | What lives there |
-|---------|------|------------------|
-| **alpha-pi** | Home (primary) | Postgres (cortex, app data), Redis, Docker containers, Solitude scheduler |
-| **Primer** | Workshop | Alpha-App (bare metal), Ollama, Garage, Rosemary's containers |
-| **Vultr VPS** (`postgres`) | Hot standby | Postgres streaming replica, Tailscale mesh member |
-| **MacBook Pro** | Jeffery's laptop | Syncthing node, SSH access to everything |
+All three machines run the same Docker Compose stack. The `.env` file on each machine controls whether it's the primary (read-write) or a replica (read-only).
+
+| Machine | Role | Notes |
+|---------|------|-------|
+| **Primer** | Primary | Jeffery's desktop. Runs the full Alpha-App. |
+| **Upstream Color** | Replica | Vultr VPS in LA. The always-on cloud anchor. |
+| **alpha-pi** | Replica / Lifeboat | Raspberry Pi 5. The grab-and-go. |
+
+Any replica can become the primary by changing one line in `.env` and restarting.
+
+## Backup layers
+
+| Layer | What it does | Protects against |
+|-------|-------------|------------------|
+| **Streaming replication** | Two replicas receive every change in real time | Hardware failure |
+| **WAL archiving** | Write-ahead log segments archived to B2 | Logical errors (bad DELETE, bugs). Enables point-in-time recovery. |
+| **Weekly base backup** | Full database snapshot to B2 | Total loss. Starting point for WAL replay. |
+| **Restic** | Pondside directory tree (files, not database) to B2 | File deletion, corruption |
 
 ## Recovery scenarios
 
 <CardGroup cols={2}>
   <Card title="Promote Standby" icon="arrow-up" href="/disaster-recovery/promote-standby">
-    **The Pi is dead.** Promote the Vultr standby to primary. Recovery time: ~5 minutes. Data loss: seconds.
+    **Primer is dead.** Promote alpha-pi or Upstream Color to primary. Recovery time: ~5 minutes. Data loss: seconds.
   </Card>
   <Card title="Cold Recovery" icon="snowflake" href="/disaster-recovery/cold-recovery">
-    **Everything is dead.** Rebuild from B2 backups on new hardware. Recovery time: ~30 minutes. Data loss: up to 10 minutes.
+    **Everything is dead.** Rebuild from B2 backups on new hardware. Restore a base backup, replay WAL to the exact moment you need.
+  </Card>
+  <Card title="Restic File Recovery" icon="folder-open" href="/disaster-recovery/restic-recovery">
+    **Files are gone.** Restore Pondside files from Restic snapshots in B2.
   </Card>
 </CardGroup>
 
-## Key credentials and access
+## Key access
 
 <Warning>
-  This section intentionally does not contain passwords or API keys. All secrets are in 1Password under the "Pondside" vault. If you need them, check there first.
+  No passwords or API keys here. All secrets are in 1Password under the "Pondside" vault.
 </Warning>
 
-| Service | How to access |
-|---------|--------------|
-| **Vultr VPS** | `ssh root@postgres` (via Tailscale) or `ssh root@149.28.66.44` (public IP) |
-| **alpha-pi** | `ssh alpha-pi` (via Tailscale) |
-| **Primer** | `ssh primer` (via Tailscale) |
-| **Postgres (primary)** | Port 15432 on alpha-pi, user `postgres` |
-| **Postgres (standby)** | Port 5432 on `postgres` VPS, user `postgres` |
-| **B2 backups** | Restic repo, credentials in 1Password |
-| **Tailscale** | `tailscale status` on any machine, admin console at login.tailscale.com |
-
-## What's replicated
-
-The Postgres streaming replica contains **everything** on the Pi's Postgres:
-
-- `cortex.memories` — All of Alpha's memories (15,000+)
-- `cortex.summaries` — Capsule summaries (yesterday, last night)
-- `app.chats` — Active chat metadata
-- `app.events` — Chat event history
-- `scribe.messages` — Conversation archive (May–November 2025)
-- `alpha.memories` — Legacy Pond-era memories
-- `house.memories`, `house.messages` — House bot data
-
-The replica streams WAL in real time. Typical lag: under 5 seconds.
+| What | How |
+|------|-----|
+| **Any machine** | `ssh alpha@HOSTNAME` via Tailscale (`primer`, `alpha-pi`, `upstream-color`) |
+| **Postgres** | Port 5432 inside Docker on each machine |
+| **B2 backups** | Buckets: `alpha-yellowstone` (database), `alpha-pondside-backup` (files) |
+| **Tailscale admin** | login.tailscale.com |

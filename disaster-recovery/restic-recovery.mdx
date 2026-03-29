@@ -5,12 +5,12 @@ description: "How to restore files from Pondside's Restic backups in Backblaze B
 
 ## When to use this
 
-You need to recover files — a single file you accidentally deleted, a directory you corrupted, or all of Pondside onto a new machine. This is for **files**, not the database. For Postgres recovery, see [Promote Standby](/disaster-recovery/promote-standby) or [Cold Recovery](/disaster-recovery/cold-recovery).
+You need to recover files -- a single file you accidentally deleted, a directory you corrupted, or all of Pondside onto a new machine. This is for **files**, not the database. For Postgres recovery, see [Promote Standby](/disaster-recovery/promote-standby) or [Cold Recovery](/disaster-recovery/cold-recovery).
 
 ## What you need
 
 1. **Restic** installed (`sudo apt install restic` or `brew install restic`)
-2. **Three environment variables** (all in 1Password → "Pondside" vault → "B2 Backups"):
+2. **Three environment variables** (all in 1Password -> "Pondside" vault -> "B2 Backups"):
 
 ```bash
 export AWS_ACCESS_KEY_ID="your-key-id"
@@ -52,7 +52,7 @@ restic restore latest --target /tmp/restore --include "/Pondside/Alpha-Home/Alph
 # Your file is now at /tmp/restore/Pondside/Alpha-Home/Alpha/prompts/system/soul.md
 ```
 
-The `--include` path must match the path as it appears in the snapshot (starting with `/Pondside`). Use `--target` to choose where the restored files land — Restic recreates the full directory structure under that target.
+The `--include` path must match the path as it appears in the snapshot (starting with `/Pondside`). Use `--target` to choose where the restored files land -- Restic recreates the full directory structure under that target.
 
 ## Restore a directory
 
@@ -136,8 +136,8 @@ sudo chown -R $(whoami):$(whoami) /Pondside
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up
 
-# 7. You now have all files. Set up Postgres separately
-#    (see Cold Recovery docs for database restoration)
+# 7. Install Docker and start the Compose stack
+#    See Cold Recovery docs for database restoration
 ```
 
 ## What's in the backup
@@ -145,15 +145,14 @@ sudo tailscale up
 Everything in `/Pondside` except:
 - `.git/objects` (reconstructible from remotes)
 - `node_modules`, `.venv`, `__pycache__` (reconstructible from package managers)
-- Redis data files (ephemeral, rebuilds itself)
 - Build artifacts (`dist/`, `build/`, `*.egg-info`)
 
 ## What's NOT in the backup
 
-- **The database** — Postgres is backed up separately via pg_dump to B2 (bucket: `alpha-postgres-backup`)
-- **Docker volumes** — container state doesn't live in Pondside
-- **System configuration** — `/etc/` files, systemd units, crontabs
+- **The database** — Postgres is backed up separately (streaming replicas + WAL archiving + base backups to B2). See [Cold Recovery](/disaster-recovery/cold-recovery).
+- **Docker volumes** -- container state doesn't live in Pondside
+- **System configuration** -- `/etc/` files, systemd units, crontabs
 
 ## Backup schedule
 
-Restic runs every 10 minutes on Primer via crontab. Retention policy: 24 hourly, 7 daily, 4 weekly, 6 monthly snapshots. The B2 bucket is `alpha-pondside-backup`.
+Restic runs on Primer via crontab. Retention policy: 24 hourly, 7 daily, 4 weekly, 6 monthly snapshots. The B2 bucket is `alpha-pondside-backup`.

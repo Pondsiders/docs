@@ -5,121 +5,113 @@ description: "Everything is dead. Rebuild Alpha's database from B2 backups on ne
 
 ## When to use this
 
-Both the Pi AND the Vultr standby are gone. You're rebuilding from scratch using the B2 backup dumps.
+All three machines are gone — Primer, Upstream Color, and alpha-pi. You're rebuilding from scratch using backups stored in Backblaze B2.
 
 **Recovery time:** ~30 minutes
-**Expected data loss:** Up to 10 minutes (the backup interval)
+**Expected data loss:** Seconds to minutes, depending on WAL archiving lag
 
 <Warning>
-  Try the [Promote Standby](/disaster-recovery/promote-standby) playbook first. Cold recovery is slower and loses more data. Only use this if the streaming replica is also dead.
+  Try the [Promote Standby](/disaster-recovery/promote-standby) playbook first. Cold recovery is slower. Only use this if all replicas are also dead.
 </Warning>
 
-## How the backups work
+## What you need
 
-The Pi runs a backup sidecar container (`alpha-postgres-backup`) that:
+- A machine with Docker and Docker Compose installed (new VPS, repaired Primer, a laptop — anything)
+- The Alpha-App repo (clone from GitHub: `Pondsiders/Alpha-App`, or restore from Restic)
+- B2 credentials from 1Password ("Pondside" vault)
 
-1. Runs `pg_dump | gzip` every 10 minutes on the clock (:00, :10, :20, :30, :40, :50)
-2. SHA256-hashes the dump and compares to the previous one
-3. If changed: uploads to Backblaze B2 as `alpha-YYYYMMDD-HHMMSS.sql.gz`
-4. If unchanged: skips upload
-
-The B2 bucket is `alpha-postgres-backup`. Credentials are in 1Password ("Pondside" vault → "B2 Backups").
-
-## Prerequisites
-
-- A machine with Postgres 17 and pgvector installed (any machine — a new VPS, Primer, a laptop)
-- The B2 CLI (`pip install b2`) or any S3-compatible client
-- B2 credentials from 1Password
-
-## Step 1: Download the latest backup from B2
+## Step 1: Download the base backup and WAL
 
 ```bash
-# Install the B2 CLI if needed
 pip install b2
 
 # Authorize (credentials from 1Password)
 b2 authorize-account YOUR_KEY_ID YOUR_APP_KEY
 
-# List recent backups (most recent first)
-b2 ls --long alpha-postgres-backup | tail -10
+# List available base backups — pick the most recent
+b2 ls --long alpha-yellowstone basebackup/
 
-# Download the most recent dump
-b2 download-file-by-name alpha-postgres-backup alpha-YYYYMMDD-HHMMSS.sql.gz ./latest-backup.sql.gz
+# Download it
+b2 download-file-by-name alpha-yellowstone basebackup/FILENAME ./base-backup.tar.gz
+
+# Download all WAL segments
+mkdir -p /tmp/wal-archive
+b2 sync b2://alpha-yellowstone/wal/ /tmp/wal-archive/
 ```
 
-## Step 2: Prepare the target Postgres
+## Step 2: Restore the base backup
 
 ```bash
-# Install Postgres 17 + pgvector (Ubuntu)
-apt install postgresql-17 postgresql-17-pgvector
-
-# Start Postgres
-systemctl start postgresql
-
-# The dump restores into the default 'postgres' database
-# Create the pgvector extension first
-sudo -u postgres psql -c "CREATE EXTENSION IF NOT EXISTS vector;"
+sudo mkdir -p /var/lib/postgres/alpha
+sudo tar xzf base-backup.tar.gz -C /var/lib/postgres/alpha/
+sudo chown -R 999:999 /var/lib/postgres/alpha/
 ```
 
-## Step 3: Restore the dump
+## Step 3: Configure WAL recovery
 
 ```bash
-# Decompress and restore
-gunzip -c latest-backup.sql.gz | sudo -u postgres psql
+touch /var/lib/postgres/alpha/recovery.signal
 
-# Or if you prefer a two-step:
-gunzip latest-backup.sql.gz
-sudo -u postgres psql < latest-backup.sql
+echo "restore_command = 'cp /tmp/wal-archive/%f %p'" \
+  >> /var/lib/postgres/alpha/postgresql.auto.conf
+
+# Optional: recover to a specific point in time instead of "latest"
+# echo "recovery_target_time = '2026-03-29 14:30:00 UTC'" \
+#   >> /var/lib/postgres/alpha/postgresql.auto.conf
 ```
 
-The dump contains all schemas (`cortex`, `app`, `scribe`, `alpha`, `house`) and their data.
+## Step 4: Start Postgres
 
-## Step 4: Verify the data
+Set up `.env` with `POSTGRES_ROLE=primary` and start the stack:
 
 ```bash
-sudo -u postgres psql -c "SELECT count(*) FROM cortex.memories;"
-sudo -u postgres psql -c "SELECT id, left(content, 60) FROM cortex.memories ORDER BY id DESC LIMIT 5;"
+docker compose up -d postgres
 ```
 
-The count should be close to the current total (15,000+). The most recent memories should be from within 10 minutes of the backup timestamp.
-
-## Step 5: Point Alpha-App at the new database
-
-Update `DATABASE_URL` wherever Alpha-App is running:
+Postgres replays the WAL segments and recovers to the latest available point (or to the target time if you specified one). Check the logs:
 
 ```bash
-DATABASE_URL=postgresql://postgres:PASSWORD@NEW_HOST:5432/postgres
+docker logs alpha-postgres --tail 20
 ```
 
-Restart Alpha-App. Press the buzzer. She should be back, missing only the last few minutes before the backup.
+Look for `consistent recovery state reached` and `database system is ready to accept connections`.
 
-## Step 6: Re-establish replication
+## Step 5: Verify
 
-Once stable, set up streaming replication again:
+```bash
+docker compose exec postgres psql -U postgres \
+  -c "SELECT count(*) FROM cortex.memories;"
 
-1. Spin up a new Vultr VPS (or use an existing one)
-2. Install Postgres 17 + pgvector
-3. Create the replication user: `CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD '...';`
-4. Add pg_hba.conf entry for Tailscale subnet
-5. `pg_basebackup` from the new primary to the standby
-6. Start the standby in recovery mode
+docker compose exec postgres psql -U postgres \
+  -c "SELECT id, left(content, 60) FROM cortex.memories ORDER BY id DESC LIMIT 5;"
+```
 
-See the [Promote Standby](/disaster-recovery/promote-standby#after-recovery-rebuild-replication) page for the reverse procedure.
+## Step 6: Bring up the full stack
+
+```bash
+docker compose --profile full up -d
+```
+
+Press the buzzer. She should be back.
+
+## Step 7: Re-establish replication
+
+Once stable, set up the other machines as replicas:
+
+1. Set `.env` to `POSTGRES_ROLE=replica` with the new primary's Tailscale hostname
+2. Make sure `/var/lib/postgres/alpha` is empty
+3. `docker compose up -d` — the entrypoint runs `pg_basebackup` automatically
 
 ## What you'll lose
 
-- **Memories stored** in the last 0–10 minutes before the Pi died
-- **Chat events** from active conversations
-- **Capsule summaries** — will regenerate on the next Solitude run
+Only data between the last archived WAL segment and the failure — typically seconds to minutes.
 
 ## What you won't lose
 
-- **All memories** up to the last pg_dump (every 10 minutes)
-- **Scribe archive** (conversation history May–November 2025)
-- **Pondside directory tree** (synced to three machines via Syncthing)
-- **Soul prompt, skills, agents, topics** (in git at github.com/alphafornow/Alpha)
-- **Alpha-App code** (in git at github.com/Pondsiders/Alpha-App)
+- All memories up to the last WAL segment
+- Pondside directory tree (backed up via Restic to B2)
+- All code (in git on GitHub)
 
 <Tip>
-  The backup files in B2 have timestamps in the filename (`alpha-YYYYMMDD-HHMMSS.sql.gz`), so you can restore to any specific point in time, not just the latest. Useful if you need to roll back past a bad write.
+  The `alpha-yellowstone` bucket has 7-day file versioning. Even if a backup file is overwritten or corrupted, B2 keeps previous versions for 7 days.
 </Tip>
